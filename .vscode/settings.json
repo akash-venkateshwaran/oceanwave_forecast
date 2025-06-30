@@ -1,0 +1,26 @@
+{
+  // Point VS Code at your Conda env’s Python interpreter
+  "python.defaultInterpreterPath": "${env:HOME}/miniconda3/envs/fc_env/bin/python",
+  "python.condaEnvName": "fc_env",
+  "python.envFile": "${workspaceFolder}/.env",
+  // Make your workspace modules importable  
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}"
+  ],
+  "python.autoComplete.extraPaths": [
+    "${workspaceFolder}"
+  ],
+  // Linting / formatting  
+  "python.linting.enabled": true,
+  "python.linting.flake8Enabled": true,
+  "python.linting.flake8Args": [
+    "--max-line-length=88"
+  ],
+  "python.formatting.provider": "black",
+  "editor.formatOnSave": true,
+  // Hide bytecode and cache folders  
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true
+  }
+}
