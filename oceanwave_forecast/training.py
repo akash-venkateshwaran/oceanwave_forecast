@@ -7,7 +7,7 @@ import numpy as np
 from oceanwave_forecast  import data_manager
 from oceanwave_forecast import data_pipeline
 from oceanwave_forecast    import models
-import mlflow
+from oceanwave_forecast.mlflow_utils import MLflowExperimentManager
 import random
 import matplotlib.pyplot as plt
 
@@ -142,7 +142,8 @@ def make_datasets(
 
 def train_once(
     data_cfg: Dict,
-    model_cfg: Dict
+    model_cfg: Dict,
+    mlflow_manager: MLflowExperimentManager
 ) -> Tuple[float, nn.Module]:
     """
     Trains a Seq2Seq model using:
@@ -200,8 +201,8 @@ def train_once(
             best_state    = copy.deepcopy(model.state_dict())
 
         # ---- (d) Log metrics to MLflow (if you are using it) ----
-        mlflow.log_metric("train_loss", train_loss.item(), step=epoch)
-        mlflow.log_metric("val_loss",   val_loss.item(),   step=epoch)
+        mlflow_manager.log_metric("train_loss", train_loss.item(), step=epoch)
+        mlflow_manager.log_metric("val_loss",   val_loss.item(),   step=epoch)
 
     # 4. Reload best‐seen weights
     if best_state is not None:
