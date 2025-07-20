@@ -20,3 +20,8 @@ MODELS_DIR = PROJ_ROOT / "models"
 
 REPORTS_DIR = PROJ_ROOT / "reports"
 FIGURES_DIR = REPORTS_DIR / "figures"
+
+START_DATE, END_DATE = '2024-01-01', '2024-06-30'
+
+TARGETS = ['WVHT', 'APD']
+
