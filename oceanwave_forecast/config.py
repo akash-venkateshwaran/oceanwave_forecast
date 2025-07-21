@@ -35,3 +35,10 @@ MLFLOW_CONFIG_BACKTESTING = {
 }
 
 
+# ── Time‐window constants ─────────────────────────────────────────────────────
+ONE_DAY         = 24
+ONE_WEEK        = ONE_DAY * 7
+HORIZON   = ONE_DAY * 3 # The prediction horizon in hours
+WINDOW = ONE_WEEK * 3 # The time window for feature engineering in hours
+
+RANDOM_STATE = 42  # For reproducibility
