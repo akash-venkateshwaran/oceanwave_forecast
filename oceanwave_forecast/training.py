@@ -10,48 +10,131 @@ from oceanwave_forecast    import models
 from oceanwave_forecast.mlflow_utils import MLflowExperimentManager
 import random
 import matplotlib.pyplot as plt
+from sktime.forecasting.base import ForecastingHorizon
+from oceanwave_forecast import config, mlflow_utils
 
 _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-
-
-
-# TODO This plotting func is only for testing, remove it
-def plot_random_sample(x_train: torch.Tensor, y_train: torch.Tensor):
+def run_training_testing_pipeline(
+    forecaster,
+    model_name,
+    run_number,
+    y_train_transformed,
+    y_test,
+    X_feat_train=None,
+    X_feat_test=None,
+    pipe_Y=None,
+    y_differencer=None,                # << NEW
+    scorers=None,
+    extra_params=None,
+    use_exog=False,
+):
     """
-    Plot one random example from the train set, overlaying all 3 input features
-    and then the target horizon series on the same axis.
-
-    x_train: Tensor of shape (window, batch, features=3)
-    y_train: Tensor of shape (horizon, batch)
+    Execute a generic training pipeline with MLflow tracking for any forecaster.
+    
+    Args:
+        forecaster: Fitted or unfitted forecaster object
+        model_name: Name of the model (e.g., "XGBoost", "Naive")
+        run_number: MLflow run number for experiment tracking
+        y_train_transformed: Transformed training target DataFrame
+        y_test: Test target DataFrame for evaluation
+        X_feat_train: Training features DataFrame (if using exogenous variables)
+        X_feat_test: Test features DataFrame (if using exogenous variables)
+        pipe_Y: Transformer object for inverse-transforming predictions
+        scorers: List of scorer callables to compute metrics
+        extra_params: Dict of additional parameters to log (optional)
+        use_exog: Whether to use exogenous variables (X) for training/prediction
+    
+    Returns:
+        MLflow run object
     """
-    window, batch_size, num_feats = x_train.shape
-    horizon = y_train.shape[0]
-    assert num_feats == 3, "Expected exactly 3 features in x_train"
+    # Initialize the experiment manager
+    exp_manager = mlflow_utils.MLflowExperimentManager(
+        experiment_name=config.MLFLOW_CONFIG_BACKTESTING['experiment_name'],
+        run_number=run_number,
+        tags=config.MLFLOW_CONFIG_BACKTESTING['tags']
+    )
 
-    # pick a random batch index
-    idx = random.randrange(batch_size)
+    # Start MLflow run
+    run = exp_manager.start_mlflow_run(run_name_prefix=model_name)
 
-    # extract and convert to numpy
-    inp = x_train[:, idx, :].detach().cpu().numpy()  # shape (window, 3)
-    tgt = y_train[:, idx].detach().cpu().numpy()     # shape (horizon,)
+    # Check if this is a finished run
+    if run.info.status == "FINISHED":
+        print(f"🟢 Finished {model_name} run already logged (id={run.info.run_id}) – skipping.")
+        return run
 
-    # build time axes
-    t_in  = np.arange(window)
-    t_out = np.arange(window, window + horizon)
+    try:
+        # Extract and log forecaster parameters
+        forecaster_params = forecaster.get_params()
+        if forecaster_params:
+            exp_manager.log_params(forecaster_params)
 
-    # plot
-    fig, ax = plt.subplots()
-    ax.plot(t_in, inp[:, 0], label="Feat 0 (input)")
-    ax.plot(t_in, inp[:, 1], label="Feat 1 (input)")
-    ax.plot(t_in, inp[:, 2], label="Feat 2 (input)")
-    ax.plot(t_out, tgt,   label="Target continuation", linewidth=2, linestyle="--")
-    ax.set_xlabel("Timestep")
-    ax.set_ylabel("Normalized value")
-    ax.set_title(f"Sample #{idx}: Inputs + Continuation")
-    ax.legend()
-    plt.tight_layout()
-    plt.show()
+        # Log basic parameters
+        exp_manager.log_param("model_type", model_name)
+        exp_manager.log_param("targets", ",".join(config.TARGETS))
+
+        # Log additional parameters if provided
+        if extra_params:
+            exp_manager.log_params(extra_params)
+
+        print(f"🔄 Starting {model_name} training...")
+
+        # Fit the forecaster
+        if use_exog:
+            forecaster.fit(y=y_train_transformed, X=X_feat_train)
+            y_pred = forecaster.predict(
+                fh=ForecastingHorizon(y_test.index, is_relative=False),
+                X=X_feat_test
+            )
+        else:
+            forecaster.fit(y=y_train_transformed)
+            y_pred = forecaster.predict(
+                fh=ForecastingHorizon(y_test.index, is_relative=False)
+            )
+
+        # -------------------------------------------------------------
+        #   Inverse transforms:  diff  →  scale
+        # -------------------------------------------------------------
+        if y_differencer is not None:
+            y_pred = y_differencer.inverse_transform(y_pred)
+        if pipe_Y is not None:
+            y_pred = pipe_Y.inverse_transform(y_pred)
+
+
+        # Plot and save results for each target
+        for target in y_pred.columns:
+            plt.figure(figsize=(12, 6))
+            plt.plot(y_test[target], label=f"Actual ({target})")
+            plt.plot(y_pred[target], label=f"Forecast ({target})", ls="--")
+            plt.title(f"{model_name} forecast – {target}")
+            plt.grid(True)
+            plt.legend()
+            plt.tight_layout()
+
+            plot_path = config.REPORTS_DIR / f"Run{run_number}_{model_name}_{target}.png"
+            plt.savefig(plot_path)
+            exp_manager.log_artifact(str(plot_path), "plots")
+            plt.close()
+
+
+        # Calculate and log metrics
+        metrics = {}
+        if scorers:
+            for scorer in scorers:
+                name  = scorer.__class__.__name__
+                value = scorer(y_test, y_pred)
+                metrics[name] = value
+                print(f"{name}: {value:.4f}")
+            exp_manager.log_metrics(metrics)
+
+        print(f"✅  {model_name} run complete.")
+    finally:
+        exp_manager.end_mlflow_run()
+
+    return run
+
+
+
 
 
 def make_datasets(

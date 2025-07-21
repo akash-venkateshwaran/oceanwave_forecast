@@ -127,7 +127,7 @@ def get_pipelines(list_X_cols):
     # 1. Create the Y pipeline 
     pipe_Y = TransformerPipeline(steps=[
     ("imputer",      Imputer(method="ffill")),              # 1) fill NaNs
-    ("deseasonalize", Deseasonalizer(sp=24)),               # 2) de‑seasonalize
+    # ("deseasonalize", Deseasonalizer(sp=24)),               # 2) de‑seasonalize
     ("scale",        TabularToSeriesAdaptor(StandardScaler())),  # 3) scale
     ])
 
@@ -169,23 +169,23 @@ def get_pipelines(list_X_cols):
     )
 
     # Step 2: Deseasonalization pipeline
-    deseason_pipe = ColumnEnsembleTransformer(
-        transformers=[
-            # Deseasonalize with period 48 for MWD_sin, MWD_cos
-            ("deseason_48", Deseasonalizer(sp=48), season_48_cols),
-            # Deseasonalize with period 24 for WSPD, GST, ATMP, WTMP, WDIR_sin
-            ("deseason_24", Deseasonalizer(sp=24), season_24_cols),
-        ],
-        remainder="passthrough",  # Pass through any remaining columns
-    )
+    # deseason_pipe = ColumnEnsembleTransformer(
+    #     transformers=[
+    #         # Deseasonalize with period 48 for MWD_sin, MWD_cos
+    #         ("deseason_48", Deseasonalizer(sp=48), season_48_cols),
+    #         # Deseasonalize with period 24 for WSPD, GST, ATMP, WTMP, WDIR_sin
+    #         ("deseason_24", Deseasonalizer(sp=24), season_24_cols),
+    #     ],
+    #     remainder="passthrough",  # Pass through any remaining columns
+    # )
 
-    # Step 3: Detrend pipeline for ATMP, WTMP, DEWP with polynomial order 4
-    detrend_pipe = ColumnEnsembleTransformer(
-        transformers=[
-            ("detrend", Detrender(forecaster=PolynomialTrendForecaster(degree=4)), detrend_cols),
-        ],
-        remainder="passthrough",  # Pass through any remaining columns
-    )
+    # # Step 3: Detrend pipeline for ATMP, WTMP, DEWP with polynomial order 4
+    # detrend_pipe = ColumnEnsembleTransformer(
+    #     transformers=[
+    #         ("detrend", Detrender(forecaster=PolynomialTrendForecaster(degree=4)), detrend_cols),
+    #     ],
+    #     remainder="passthrough",  # Pass through any remaining columns
+    # )
 
     # Step 4: Standard scaling pipeline for all columns
     scaler_pipe = ColumnEnsembleTransformer(
@@ -199,8 +199,8 @@ def get_pipelines(list_X_cols):
     pipe_X = TransformerPipeline(
         steps=[
             ("imputer", imputer_pipe),
-            ("deseasonalizer", deseason_pipe),
-            ("detrender", detrend_pipe),
+            # ("deseasonalizer", deseason_pipe),
+            # ("detrender", detrend_pipe),
             ("scaler", scaler_pipe),
         ]
     )

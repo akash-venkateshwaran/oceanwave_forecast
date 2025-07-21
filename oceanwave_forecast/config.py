@@ -25,3 +25,13 @@ START_DATE, END_DATE = '2024-01-01', '2024-06-30'
 
 TARGETS = ['WVHT', 'APD']
 
+MLFLOW_CONFIG_BACKTESTING = {
+    "experiment_name": "Oceanwave_Backtesting",
+    "tags": {
+        "project": "Oceanwave Forecasting",
+        "type": "Backtesting",
+        "framework": "sktime",
+    },
+}
+
+
