@@ -2,6 +2,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from loguru import logger
+from sktime.performance_metrics.forecasting import MeanSquaredPercentageError, MeanAbsolutePercentageError
 
 # Load environment variables from .env file if it exists
 load_dotenv()
@@ -34,11 +35,41 @@ MLFLOW_CONFIG_BACKTESTING = {
     },
 }
 
+SCORERS = [MeanSquaredPercentageError(square_root=True), MeanAbsolutePercentageError()]
+
 
 # ── Time‐window constants ─────────────────────────────────────────────────────
-ONE_DAY         = 24
-ONE_WEEK        = ONE_DAY * 7
-HORIZON   = ONE_DAY * 3 # The prediction horizon in hours
-WINDOW = ONE_WEEK * 3 # The time window for feature engineering in hours
+ONE_DAY = 24
+ONE_WEEK = ONE_DAY * 7
+HORIZON = ONE_DAY * 3  # The prediction horizon in hours
+WINDOW = ONE_WEEK * 3  # The time window for feature engineering in hours
 
 RANDOM_STATE = 42  # For reproducibility
+
+# ── ML Model Configuration ───────────────────────────────────────────────────
+DEEPAR_CONFIG = {
+    # Model architecture
+    "lstm_hidden_dim": 128,
+    "lstm_layers": 3,
+    "lstm_dropout": 0.2,
+    "embedding_dim": 32,
+    "num_class": 12,
+    
+    # Training parameters
+    "batch_size": 64,
+    "learning_rate": 0.001,
+    "num_epochs": 2000,
+    "early_stopping_patience": 15,
+    "weight_decay": 1e-5,
+    
+    # Data parameters
+    "predict_steps": HORIZON,
+    "window_size": WINDOW,
+    "predict_start": WINDOW,
+    
+    # Sampling parameters
+    "sample_times": 100,
+    
+    # Device configuration
+    "device": "cuda"
+}

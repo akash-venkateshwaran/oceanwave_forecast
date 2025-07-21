@@ -1,130 +1,265 @@
+"""
+Simplified DeepAR Neural Network for Time Series Forecasting
+Production-ready implementation with clean architecture and configuration management.
+"""
+
+import math
+from typing import Tuple, Optional, Union
+import numpy as np
 import torch
 import torch.nn as nn
-from torch import Tensor
-from typing import Tuple
 import torch.nn.functional as F
+from torch.autograd import Variable
+from loguru import logger
 
 
-class Encoder(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int, num_layers: int = 1):
-        super().__init__()
-        self.gru = nn.GRU(input_size, hidden_size, num_layers)
-
-    def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
-        x = x.view(x.size(0), x.size(1), -1)          # flatten features
-        return self.gru(x)                            # (seq, batch, hidden), h_n
-
-
-class Decoder(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int,
-                 hidden_fc: int, output_size: int = 1, num_layers: int = 1):
-        super().__init__()
-        self.gru  = nn.GRU(input_size, hidden_size, num_layers)
-        self.lin1 = nn.Linear(hidden_size, hidden_fc)
-        self.lin2 = nn.Linear(hidden_fc, output_size)
-
-    def forward(self, x: Tensor, h: Tensor) -> Tuple[Tensor, Tensor]:
-        out, h = self.gru(x.unsqueeze(0), h)          # add seq dim
-        y = torch.relu(self.lin1(out.squeeze(0)))
-        return self.lin2(y), h
-
-
-class Seq2Seq(nn.Module):
-    """Simple encoder-decoder GRU for multi-feature → single-output seq."""
-
-    def __init__(self, hidden_size: int, hidden_fc: int,
-                 input_size: int = 3, output_size: int = 1):
-        super().__init__()
-        self.encoder = Encoder(input_size, hidden_size)
-        self.decoder = Decoder(output_size, hidden_size, hidden_fc, output_size)
-
-    def forward(self, src: Tensor, horizon: int,
-                teacher_ratio: float = 0.0, trg_truth: Tensor | None = None) -> Tensor:
-        
+class DeepARNet(nn.Module):
+    """
+    DeepAR: A recurrent neural network for time series forecasting.
+    
+    
+    """
+    
+    def __init__(self, config: dict):
         """
-        Forward process for sequence-to-sequence prediction.
-        
-        The model predicts the next 'horizon' steps using an encoder-decoder architecture:
-        
-        1. ENCODING PHASE:
-           - Process the entire input sequence (src) through the encoder
-           - Extract the final hidden state as context for the decoder
-        
-        2. DECODING PHASE (Autoregressive Generation):
-           - For each time step in the prediction horizon:
-             a) Feed the current input to the decoder along with hidden state
-             b) Decoder outputs: prediction for this step + updated hidden state
-             c) Decide next input: either use ground truth (teacher forcing) or own prediction
-             d) Repeat for next time step
+        Initialize the DeepAR network.
         
         Args:
-            src: Input sequence (seq_len, batch_size, input_features)
-            horizon: Number of future steps to predict
-            teacher_ratio: Probability of using ground truth vs. model prediction during training
-            trg_truth: Ground truth target sequence for teacher forcing (optional)
-        
-        Returns:
-            Predicted sequence (horizon, batch_size, output_features)
+            config: Dictionary containing model configuration parameters
         """
-
-
-        _, h = self.encoder(src)                      # h: (layers, batch, hidden)
-        dec_in = src[-1, :, 0].unsqueeze(1)           # latest true value
-        outputs = torch.zeros(horizon, src.size(1), 1, device=src.device)
-
-        for t in range(horizon):
-            dec_out, h = self.decoder(dec_in, h)
-            outputs[t] = dec_out
-            use_tf = self.training and trg_truth is not None and torch.rand(1) < teacher_ratio
-            dec_in  = trg_truth[t].unsqueeze(1) if use_tf else dec_out
-        return outputs
-
-    def predict(self, src: Tensor, horizon: int) -> Tensor:
+        super(DeepARNet, self).__init__()
+        self.config = config
+        
+        # Validate configuration
+        self._validate_config()
+        
+        # Set device
+        self.device = torch.device(config["device"] if torch.cuda.is_available() else "cpu")
+        logger.info(f"Using device: {self.device}")
+        
+        # Embedding layer for time series IDs
+        self.embedding = nn.Embedding(
+            config["num_class"], 
+            config["embedding_dim"]
+        )
+        
+        # LSTM layer
+        lstm_input_size = 1 + config["cov_dim"] + config["embedding_dim"]
+        self.lstm = nn.LSTM(
+            input_size=lstm_input_size,
+            hidden_size=config["lstm_hidden_dim"],
+            num_layers=config["lstm_layers"],
+            bias=True,
+            batch_first=False,
+            dropout=config["lstm_dropout"] if config["lstm_layers"] > 1 else 0
+        )
+        
+        # Initialize LSTM forget gate bias to 1 (recommended practice)
+        self._init_lstm_weights()
+        
+        # Output layers for distribution parameters
+        hidden_combined_size = config["lstm_hidden_dim"] * config["lstm_layers"]
+        self.mu_layer = nn.Linear(hidden_combined_size, 1)
+        self.sigma_layer = nn.Sequential(
+            nn.Linear(hidden_combined_size, 1),
+            nn.Softplus()  # Ensures positive values for sigma
+        )
+        
+        # Move model to device
+        self.to(self.device)
+        
+    def _validate_config(self):
+        """Validate configuration parameters."""
+        required_keys = [
+            "lstm_hidden_dim", "lstm_layers", "lstm_dropout", "embedding_dim",
+            "num_class", "cov_dim", "predict_steps", "sample_times", "device"
+        ]
+        
+        for key in required_keys:
+            if key not in self.config:
+                raise ValueError(f"Missing required configuration key: {key}")
+    
+    def _init_lstm_weights(self):
+        """Initialize LSTM weights, especially forget gate bias to 1."""
+        for names in self.lstm._all_weights:
+            for name in filter(lambda n: "bias" in n, names):
+                bias = getattr(self.lstm, name)
+                n = bias.size(0)
+                start, end = n // 4, n // 2
+                bias.data[start:end].fill_(1.0)
+    
+    def forward(self, x: torch.Tensor, idx: torch.Tensor, 
+                hidden: torch.Tensor, cell: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Forward pass through the network.
+        
+        Args:
+            x: Input tensor [1, batch_size, 1+cov_dim] - previous value + covariates
+            idx: Time series ID [1, batch_size]
+            hidden: LSTM hidden state [lstm_layers, batch_size, lstm_hidden_dim]
+            cell: LSTM cell state [lstm_layers, batch_size, lstm_hidden_dim]
+            
+        Returns:
+            mu: Predicted mean [batch_size]
+            sigma: Predicted standard deviation [batch_size]
+            hidden: Updated hidden state
+            cell: Updated cell state
+        """
+        # Get embedding for time series ID
+        embed = self.embedding(idx)
+        
+        # Concatenate input with embedding
+        lstm_input = torch.cat((x, embed), dim=2)
+        
+        # LSTM forward pass
+        output, (hidden, cell) = self.lstm(lstm_input, (hidden, cell))
+        
+        # Combine hidden states from all layers
+        hidden_combined = hidden.permute(1, 2, 0).contiguous().view(hidden.shape[1], -1)
+        
+        # Predict distribution parameters
+        mu = self.mu_layer(hidden_combined).squeeze()
+        sigma = self.sigma_layer(hidden_combined).squeeze()
+        
+        return mu, sigma, hidden, cell
+    
+    def init_hidden_state(self, batch_size: int) -> torch.Tensor:
+        """Initialize hidden state."""
+        return torch.zeros(
+            self.config["lstm_layers"], 
+            batch_size, 
+            self.config["lstm_hidden_dim"],
+            device=self.device
+        )
+    
+    def init_cell_state(self, batch_size: int) -> torch.Tensor:
+        """Initialize cell state."""
+        return torch.zeros(
+            self.config["lstm_layers"], 
+            batch_size, 
+            self.config["lstm_hidden_dim"],
+            device=self.device
+        )
+    
+    def predict(self, x: torch.Tensor, v_batch: torch.Tensor, 
+                id_batch: torch.Tensor, hidden: torch.Tensor, 
+                cell: torch.Tensor) -> Union[Tuple[torch.Tensor, torch.Tensor], 
+                                                                        Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """
+        Generate predictions for future time steps.
+        
+        Args:
+            x: Input sequence
+            v_batch: Scaling parameters (scale, shift)
+            id_batch: Time series IDs
+            hidden: Initial hidden state
+            cell: Initial cell state
+            probabilistic: Whether to return probabilistic samples
+            
+        Returns:
+            If probabilistic=False: (predictions, uncertainties)
+            If probabilistic=True: (samples, predictions, uncertainties)
+        """
         self.eval()
+        batch_size = x.shape[1]
+        predict_steps = self.config["predict_steps"]
+        predict_start = self.config.get("predict_start", x.shape[0] - predict_steps)
+        
         with torch.no_grad():
-            return self.forward(src, horizon)
+                return self._point_predict(x, v_batch, id_batch, hidden, cell,
+                                         predict_start, predict_steps, batch_size)
+    
+        return samples, sample_mean, sample_std
+    
+    def _point_predict(self, x, v_batch, id_batch, hidden, cell,
+                      predict_start, predict_steps, batch_size):
+        """Generate point predictions."""
+        decoder_hidden = hidden
+        decoder_cell = cell
+        predictions = torch.zeros(batch_size, predict_steps, device=self.device)
+        uncertainties = torch.zeros(batch_size, predict_steps, device=self.device)
+        
+        for t in range(predict_steps):
+            mu, sigma, decoder_hidden, decoder_cell = self(
+                x[predict_start + t].unsqueeze(0),
+                id_batch, decoder_hidden, decoder_cell
+            )
+            
+            # Store scaled predictions
+            predictions[:, t] = mu * v_batch[:, 0] + v_batch[:, 1]
+            uncertainties[:, t] = sigma * v_batch[:, 0]
+            
+            # Update input for next step
+            if t < predict_steps - 1:
+                x[predict_start + t + 1, :, 0] = mu
+        
+        return predictions, uncertainties
 
 
+def gaussian_nll_loss(mu: torch.Tensor, sigma: torch.Tensor, 
+                      targets: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """
+    Compute Gaussian negative log-likelihood loss.
+    
+    Args:
+        mu: Predicted means [batch_size]
+        sigma: Predicted standard deviations [batch_size]
+        targets: Target values [batch_size]
+        mask: Optional mask for valid values [batch_size]
+        
+    Returns:
+        Average negative log-likelihood loss
+    """
+    if mask is None:
+        mask = (targets != 0)
+    
+    if not mask.any():
+        return torch.tensor(0.0, device=mu.device, requires_grad=True)
+    
+    mu_masked = mu[mask]
+    sigma_masked = sigma[mask]
+    targets_masked = targets[mask]
+    
+    # Gaussian negative log-likelihood
+    nll = 0.5 * torch.log(2 * math.pi * sigma_masked.pow(2)) + \
+          0.5 * ((targets_masked - mu_masked) / sigma_masked).pow(2)
+    
+    return nll.mean()
 
-class CustomModel(torch.nn.Module):
 
-    def __init__(self, n_inp, l_1, l_2, conv1_out, conv1_kernel, conv2_kernel, drop1 = 0):
-        super(CustomModel, self).__init__()
-        conv1_out_ch = conv1_out
-        conv2_out_ch = conv1_out * 2
-        conv1_kernel = conv1_kernel
-        conv2_kernel = conv2_kernel
-        self.dropout_lin1 = drop1
-
-        self.pool = torch.nn.MaxPool1d(kernel_size = 2)
-
-        self.conv1 = torch.nn.Conv1d(in_channels = 1, out_channels = conv1_out_ch, kernel_size = conv1_kernel,
-                                     padding = conv1_kernel - 1)
-
-        self.conv2 = torch.nn.Conv1d(in_channels = conv1_out_ch, out_channels = conv2_out_ch,
-                                     kernel_size = conv2_kernel,
-                                     padding = conv2_kernel - 1)
-
-        feature_tensor = self.feature_stack(torch.Tensor([[0] * n_inp]))
-
-        self.lin1 = torch.nn.Linear(feature_tensor.size()[1], l_1)
-        self.lin2 = torch.nn.Linear(l_1, l_2)
-        self.lin3 = torch.nn.Linear(l_2, 1)
-
-    def feature_stack(self, x):
-        x = x.unsqueeze(1)
-        x = F.relu(self.pool(self.conv1(x)))
-        x = F.relu(self.pool(self.conv2(x)))
-        x = x.flatten(start_dim = 1)
-        return x
-
-    def fc_stack(self, x):
-        x1 = F.dropout(F.relu(self.lin1(x)), p = self.dropout_lin1)
-        x2 = F.relu(self.lin2(x1))
-        y = self.lin3(x2)
-        return y
-
-    def forward(self, x):
-        x = self.feature_stack(x)
-        y = self.fc_stack(x)
-        return y
+def compute_metrics(predictions: torch.Tensor, targets: torch.Tensor, 
+                   mask: Optional[torch.Tensor] = None) -> dict:
+    """
+    Compute evaluation metrics.
+    
+    Args:
+        predictions: Model predictions [batch_size, seq_len] or [batch_size]
+        targets: Target values [batch_size, seq_len] or [batch_size]
+        mask: Optional mask for valid values
+        
+    Returns:
+        Dictionary containing computed metrics
+    """
+    if mask is None:
+        mask = (targets != 0)
+    
+    if not mask.any():
+        return {"mae": 0.0, "rmse": 0.0, "nd": 0.0}
+    
+    pred_masked = predictions[mask]
+    target_masked = targets[mask]
+    
+    # Mean Absolute Error
+    mae = torch.abs(pred_masked - target_masked).mean().item()
+    
+    # Root Mean Square Error
+    rmse = torch.sqrt(torch.pow(pred_masked - target_masked, 2).mean()).item()
+    
+    # Normalized Deviation
+    nd = torch.abs(pred_masked - target_masked).sum().item() / torch.abs(target_masked).sum().item()
+    
+    return {
+        "mae": mae,
+        "rmse": rmse,
+        "nd": nd
+    }
