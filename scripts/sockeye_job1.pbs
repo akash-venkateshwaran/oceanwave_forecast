@@ -1,0 +1,39 @@
+#!/bin/bash
+
+#------------------------------------------------------------
+#-
+#-                  Slurm Submission System
+#-
+#- submit:              sbatch slurm.sh
+#- list jobs:           squeue -u $USER
+#- cancel jobs:         scancel <jobid> or scancel -u $USER
+#- check running job:   scontrol show job -dd <jobid>
+#- check completed job: sacct -j <jobid>
+#- check CPU & memory:  seff <jobid>  
+#- find work directory: find . -name *<jobid>.out
+#- check user storage:  diskusage_report
+#- check system:        partition-stats
+#- data mover:          gra-dtn1.computecanada.ca
+#------------------------------------------------------------
+
+#- mpi
+
+#PBS -l walltime=48:00:00,select=1:ncpus=4:mem=25gb
+#PBS -N ca_VP1304
+#PBS -A st-rjaiman-1
+#PBS -m abe
+#PBS -M akashv22@student.ubc.ca
+#PBS -o output.txt
+#PBS -e error.txt
+
+
+cd /scratch/st-rjaiman-1/akashv/bellhop_new/Coordinate_data
+#- Activate the env
+
+source /home/akashv22/MELO/myenv/bin/activate
+python3 get_all_coordinates.py
+
+#- postprocessing part
+echo "finish at  $(date +'%F %k:%M:%S')"
+echo "complete job $(pwd)" >> ~/job_list
+
