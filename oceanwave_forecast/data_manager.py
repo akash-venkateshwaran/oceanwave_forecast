@@ -467,17 +467,3 @@ def _bartlett_formula(r: np.ndarray,
         return math.sqrt(1 / length)
     else:
         return math.sqrt((1 + 2 * sum(map(lambda x: x ** 2, r[:m - 1]))) / length)
-    
-
-    ## TODO REmove this. only for testing
-from datetime import datetime
-    
-def _load(name: str) -> pd.DataFrame:
-    return pd.read_csv(
-        name,
-        index_col="Date",
-        date_parser=lambda d: datetime.strptime(d, "%Y-%m-%d")
-    )
-
-def covid_until_feb_2021() -> pd.DataFrame:
-    return _load(r"D:\\CML\\Term 8\ML projects\forecasting_workspace\oceanwave_forecast\data\raw\COVID_19_until_2021_02_01.csv")

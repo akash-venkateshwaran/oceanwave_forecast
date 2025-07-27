@@ -9,6 +9,7 @@ from sktime.forecasting.arima import AutoARIMA
 from sklearn.preprocessing import StandardScaler
 from sktime.transformations.compose import TransformerPipeline
 from sktime.forecasting.trend import PolynomialTrendForecaster
+from oceanwave_forecast import config
 
 class MissingValueMarker(BaseEstimator, TransformerMixin):
     """
@@ -92,22 +93,12 @@ def preprocess_ocean_data(data_ocean):
         Processed dataframe with all transformations applied
     """
     
-    # A mapping of missing values to NaN
-    missing_map = {
-            # wind & gust & dominant-period wave:  99 → NaN
-            'WSPD': 99.0, 'GST': 99.0, 'DPD': 99.0, 'WVHT': 99.0, 'APD': 99.0,
-            # pressure: 9999 → NaN
-            'PRES': 9999.0,
-            # air, water & dew temps: 999 → NaN
-            'ATMP': 999.0, 'WTMP': 999.0, 'DEWP': 999.0,
-        }
-    
     # Remove columns that are not needed for the analysis
-    columns_to_drop = ['TIDE', 'VIS', 'DPD']
+    columns_to_drop = config.DROP_COLS
     
     # Imputer the missing values based on the dict map and convert degrees features to cyclic (sin and cos)
-    mv_marker = MissingValueMarker(missing_map)
-    deg2rad = DegreeToCyclic(columns=['WDIR', 'MWD'])
+    mv_marker = MissingValueMarker(config.MISSING_MAP)
+    deg2rad = DegreeToCyclic(columns=config.CYCLIC_COLS)
     
     # Apply transformations step by step
     data_ocean_clean = mv_marker.transform(data_ocean)
@@ -135,10 +126,10 @@ def get_pipelines(list_X_cols):
     # 2. Create the X pipeline
 
     # Define column groups
-    special_cols = ['MWD_sin']
-    season_48_cols = ['MWD_sin', 'MWD_cos']
-    season_24_cols = ['WSPD', 'GST', 'WTMP', 'WDIR_sin']
-    detrend_cols = ['ATMP', 'WTMP', 'DEWP']
+    special_cols = config.ARIMA_IMPUTE_COLS
+    # season_48_cols = ['MWD_sin', 'MWD_cos']
+    # season_24_cols = ['WSPD', 'GST', 'WTMP', 'WDIR_sin']
+    # detrend_cols = ['ATMP', 'WTMP', 'DEWP']
 
     # Identify other columns that are not in special_cols for the ffill imputer
     # Assuming processed_data_X has all the columns, we can get the column names
@@ -207,43 +198,3 @@ def get_pipelines(list_X_cols):
 
     return pipe_X, pipe_Y
 
-
-## TODO remove this only for testing
-
-from typing import List, Tuple
-import statsmodels.api as sm
-
-def _hp_cf(series: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    # normalize
-    series = series / series.max()
-    # Hodrick–Prescott filter
-    hp_cycle, hp_trend = sm.tsa.filters.hpfilter(series)
-    # Christiano–Fitzgerald filter
-    cf_cycle, _        = sm.tsa.filters.cffilter(series)
-    return series, hp_trend, cf_cycle
-
-def make_feature_matrix(series: np.ndarray) -> np.ndarray:
-    """
-    Returns a 2-D array of shape (timesteps, 3), where columns are
-    [normalized series, HP trend, CF cycle].
-    """
-    s, trend, cyc = _hp_cf(series)
-    # stack into shape (T, 3)
-    feats = np.column_stack((s, trend, cyc))
-    return feats
-
-def sliding_window(data: np.ndarray, win: int, horizon: int) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Given data.shape == (T, F), returns
-      X of shape (N, win,  F) and
-      Y of shape (N, horizon, F),
-    where N = T - win - horizon + 1
-    """
-    T, F = data.shape
-    N = T - win - horizon + 1
-    X = np.empty((N, win,      F), dtype=data.dtype)
-    Y = np.empty((N, horizon,  F), dtype=data.dtype)
-    for i in range(N):
-        X[i] = data[i : i+win]
-        Y[i] = data[i+win : i+win+horizon]
-    return X, Y

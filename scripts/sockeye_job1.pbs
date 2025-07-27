@@ -31,7 +31,7 @@ cd /scratch/st-rjaiman-1/akashv/bellhop_new/Coordinate_data
 #- Activate the env
 
 source /home/akashv22/MELO/myenv/bin/activate
-python3 get_all_coordinates.py
+python3 training.py
 
 #- postprocessing part
 echo "finish at  $(date +'%F %k:%M:%S')"
