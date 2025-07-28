@@ -20,7 +20,9 @@ EXTERNAL_DATA_DIR = DATA_DIR / "external"
 MODELS_DIR = PROJ_ROOT / "models"
 
 REPORTS_DIR = PROJ_ROOT / "reports"
+TESTING_REPORTS_DIR = REPORTS_DIR / "testing"
 FIGURES_DIR = REPORTS_DIR / "figures"
+LIGHTNING_LOGS = PROJ_ROOT / "lightning_logs"
 
 START_DATE, END_DATE = '2024-01-01', '2024-06-30'
 
@@ -41,6 +43,22 @@ CYCLIC_COLS = ['WDIR', 'MWD']
 
 ARIMA_IMPUTE_COLS = ['MWD_sin']
 
+EXOG_WINDOWSUMMARY_CONFIG = {
+            "lag": [1],
+            "mean": [[1, 24], [24, 48]],
+        }
+
+
+TARGET_WINDOWSUMMARY_CONFIG = {               
+    "lag":  [1, 2, 3, 4, 24, 48, 72],
+    "mean": [[1, 24], [24, 48]],  # rolling‑mean over last day & previous day
+}
+
+ID_COLS = ["group_id", "time_idx"]      # your grouping/time index columns
+
+
+
+
 # ── MLflow configuration ─────────────────────────────────────────────────────
 
 MLFLOW_CONFIG_BACKTESTING = {
@@ -49,6 +67,15 @@ MLFLOW_CONFIG_BACKTESTING = {
         "project": "Oceanwave Forecasting",
         "type": "Backtesting",
         "framework": "sktime",
+    },
+}
+
+MLFLOW_DEEPAR_CONFIG = {
+    "experiment_name": "Oceanwave_DeepAR_Training",
+    "tags": {
+        "project": "Oceanwave Forecasting",
+        "type": "Training",
+        "framework": "pytorch-forecasting",
     },
 }
 
@@ -76,21 +103,6 @@ XGB_KWARGS = {
         "n_jobs": -1,
     }
 
-
-# ── Feature Engg ────────────────────────────────────────────────
-
-EXOG_WINDOWSUMMARY_CONFIG = {
-            "lag": [1],
-            "mean": [[1, 24], [24, 48]],
-        }
-
-
-TARGET_WINDOWSUMMARY_CONFIG = {               
-    "lag":  [1, 2, 3, 4, 24, 48, 72],
-    "mean": [[1, 24], [24, 48]],  # rolling‑mean over last day & previous day
-}
-
-
 # ── DeepAR Model Configuration ────────────────────────────────────────────────
 
 DEEPAR_CONFIG = {
@@ -101,21 +113,17 @@ DEEPAR_CONFIG = {
     "embedding_dim": 32,
     "num_class": 12,
     
-    # Training parameters
-    "batch_size": 64,
-    "learning_rate": 0.001,
-    "num_epochs": 2000,
-    "early_stopping_patience": 15,
-    "weight_decay": 1e-5,
-    
-    # Data parameters
-    "predict_steps": HORIZON,
-    "window_size": WINDOW,
-    "predict_start": WINDOW,
-    
-    # Sampling parameters
-    "sample_times": 100,
-    
-    # Device configuration
-    "device": "cuda"
 }
+
+# Training Parameters
+BATCH_SIZE = 64
+NUM_WORKERS = 0
+MAX_EPOCHS = 2500
+LEARNING_RATE = 1e-3
+GRADIENT_CLIP_VAL = 0.1
+LIMIT_TRAIN_BATCHES = 50
+VAL_CHECK_INTERVAL = 0.5
+LOG_EVERY_N_STEPS = 20
+EARLY_STOP_PATIENCE = 10
+EARLY_STOP_MIN_DELTA = 1e-4
+OPTIMIZER = "adamw"  # Options: "adam", "adamw", "sgd"

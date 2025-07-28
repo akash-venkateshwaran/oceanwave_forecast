@@ -6,10 +6,8 @@ import numpy as np
 import random
 import matplotlib.pyplot as plt
 from sktime.forecasting.base import ForecastingHorizon
-from oceanwave_forecast import config, mlflow_utils
+from oceanwave_forecast import config, mlflow_utils, plotting
 import pandas as pd
-_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -19,17 +17,10 @@ from typing import List, Dict, Optional, Tuple, Any
 
 
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from torch.optim import Adam
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 import numpy as np
-from pathlib import Path
-from loguru import logger
 from typing import Dict, Tuple, Optional
 
-from oceanwave_forecast.models import DeepARNet, gaussian_nll_loss, compute_metrics
-
+from lightning.pytorch.callbacks import Callback
 
 
 
@@ -80,57 +71,6 @@ def aggregate_scores(block_scores: List[Dict[str, float]]) -> Dict[str, float]:
     
     return aggregated
 
-def create_multi_block_plot(y_true_blocks: List[pd.DataFrame], 
-                           y_pred_blocks: List[pd.DataFrame],
-                           y_train: pd.DataFrame, 
-                           y_test: pd.DataFrame,
-                           model_name: str, 
-                           target: str, 
-                           run_number: int, 
-                           save_dir: Path) -> str:
-    """Create vertically stacked subplots for each block showing predictions vs truth."""
-    n_blocks = len(y_true_blocks)
-    
-    # Create full time series for context calculation
-    y_full = pd.concat([y_train, y_test])
-    
-    # Create vertically stacked subplots
-    fig, axes = plt.subplots(n_blocks, 1, figsize=(12, 4 * n_blocks))
-    if n_blocks == 1:
-        axes = [axes]
-    
-    for i, (y_true_block, y_pred_block) in enumerate(zip(y_true_blocks, y_pred_blocks)):
-        ax = axes[i]
-        
-        # Find the context: 50 points before the start of current block
-        block_start_idx = y_full.index.get_loc(y_true_block.index[0])
-        context_start_idx = max(0, block_start_idx - 50)
-        context_data = y_full[target].iloc[context_start_idx:block_start_idx]
-        
-        # Plot context if available
-        if len(context_data) > 0:
-            ax.plot(context_data.index, context_data.values, 
-                    label='Context', color='lightblue', alpha=0.7)
-        
-        # Plot truth and predictions
-        ax.plot(y_true_block.index, y_true_block[target], 
-                label='Truth', color='blue', linewidth=2)
-        ax.plot(y_pred_block.index, y_pred_block[target], 
-                label='Prediction', color='red', linestyle='--', linewidth=2)
-        
-        ax.set_title(f'Block {i+1}: {target}')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        ax.tick_params(axis='x', rotation=45)
-    
-    plt.suptitle(f'{model_name} - {target} (Blocks: {n_blocks})', fontsize=14)
-    plt.tight_layout()
-    
-    plot_path = save_dir / f"Run{run_number}_{model_name}_{target}_blocks.png"
-    plt.savefig(plot_path, dpi=100, bbox_inches='tight')
-    plt.close()
-    
-    return str(plot_path)
 
 def process_blocks_iteratively(forecaster, y_train_final: pd.DataFrame, 
                               y_test_blocks: List[pd.DataFrame],
@@ -314,7 +254,7 @@ def run_training_testing_pipeline(
         # Generate plots for each target
         plot_paths = []
         for target in y_test.columns:
-            plot_path = create_multi_block_plot(
+            plot_path = plotting.create_multi_block_plot(
                 y_test_blocks, y_pred_blocks_final, y_train, y_test,
                 model_name, target, run_number, config.REPORTS_DIR
             )
@@ -334,406 +274,123 @@ def run_training_testing_pipeline(
 
 
 
-
-
-class DeepARTrainer:
+class PrintMetricsCallback(Callback):
     """
-    Trainer class for DeepAR model with production-ready features.
+    Custom PyTorch Lightning callback to print training and validation metrics
+    at a specified epoch interval.
     """
+    def __init__(self, print_every_n_epochs=10):
+        self.print_every_n_epochs = print_every_n_epochs
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        """
+        Hook that runs at the end of each validation epoch.
+        """
+        epoch = trainer.current_epoch
+        if (epoch) % self.print_every_n_epochs == 0:
+            metrics = trainer.callback_metrics
+            train_loss = metrics.get('train_loss_epoch')
+            val_loss = metrics.get('val_loss')
+
+            print(f"\nEpoch {epoch} Summary:")
+            if train_loss is not None:
+                print(f"  -> Train Loss: {train_loss:.4f}")
+            if val_loss is not None:
+                print(f"  -> Validation Loss: {val_loss:.4f}")
+            print("-" * 30)
+
+
+
+def evaluate_with_model_metrics(model, val_dataloader):
+    """
+    Use the model's own loss/metric computation methods.
+    This leverages the model's training logic for consistent evaluation.
+    """
+    model.eval()
+    total_loss = 0
+    all_outputs = []
+    all_targets = []
     
-    def __init__(self, config: Dict):
-        """
-        Initialize trainer with configuration.
-        
-        Args:
-            config: Configuration dictionary containing model and training parameters
-        """
-        self.config = config
-        self.device = torch.device(config["device"] if torch.cuda.is_available() else "cpu")
-        
-        # Initialize model
-        # self.model = DeepARNet(config)
-        self.model = None
-        
-        # Initialize optimizer and scheduler
-        self.my_param = nn.Parameter(torch.randn(10, 5))
-
-        self.optimizer = Adam(
-            [ self.my_param ],               # <-- note the list here
-            lr=config["learning_rate"],
-            weight_decay=config.get("weight_decay", 0)
-        )
-        
-        self.scheduler = ReduceLROnPlateau(
-            self.optimizer,
-            mode='min',
-            factor=0.5,
-            patience=config.get("lr_patience", 10),
-            verbose=True
-        )
-        
-        # Training state
-        self.best_loss = float('inf')
-        self.patience_counter = 0
-        self.training_history = {
-            'train_loss': [],
-            'val_loss': [],
-            'train_metrics': [],
-            'val_metrics': []
-        }
-        
-        logger.info(f"Initialized DeepAR trainer on device: {self.device}")
-    
-    def train_epoch(self, train_loader: DataLoader) -> Dict:
-        """
-        Train for one epoch.
-        
-        Args:
-            train_loader: Training data loader
+    with torch.no_grad():
+        for batch in val_dataloader:
+            # Use the model's own step method which handles metrics correctly
+            if hasattr(model, 'validation_step'):
+                step_output = model.validation_step(batch, 0)  # batch_idx=0
+                if isinstance(step_output, dict) and 'loss' in step_output:
+                    total_loss += step_output['loss'].item()
             
-        Returns:
-            Dictionary containing training metrics
-        """
-        self.model.train()
-        total_loss = 0.0
-        all_predictions = []
-        all_targets = []
-        
-        for batch_idx, batch in enumerate(train_loader):
-            # Move batch to device
-            batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
-                    for k, v in batch.items()}
-            
-            # Forward pass
-            loss, predictions, targets = self._forward_pass(batch)
-            
-            # Backward pass
-            self.optimizer.zero_grad()
-            loss.backward()
-            
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            
-            self.optimizer.step()
-            
-            total_loss += loss.item()
-            all_predictions.extend(predictions.cpu().numpy())
-            all_targets.extend(targets.cpu().numpy())
-            
-            if batch_idx % 100 == 0:
-                logger.info(f"Batch {batch_idx}/{len(train_loader)}, Loss: {loss.item():.6f}")
-        
-        # Compute metrics
-        avg_loss = total_loss / len(train_loader)
-        metrics = compute_metrics(
-            torch.tensor(all_predictions),
-            torch.tensor(all_targets)
-        )
-        
-        return {"loss": avg_loss, **metrics}
-    
-    def validate_epoch(self, val_loader: DataLoader) -> Dict:
-        """
-        Validate for one epoch.
-        
-        Args:
-            val_loader: Validation data loader
-            
-        Returns:
-            Dictionary containing validation metrics
-        """
-        self.model.eval()
-        total_loss = 0.0
-        all_predictions = []
-        all_targets = []
-        
-        with torch.no_grad():
-            for batch in val_loader:
-                # Move batch to device
-                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
-                        for k, v in batch.items()}
-                
-                # Forward pass
-                loss, predictions, targets = self._forward_pass(batch)
-                
-                total_loss += loss.item()
-                all_predictions.extend(predictions.cpu().numpy())
-                all_targets.extend(targets.cpu().numpy())
-        
-        # Compute metrics
-        avg_loss = total_loss / len(val_loader)
-        metrics = compute_metrics(
-            torch.tensor(all_predictions),
-            torch.tensor(all_targets)
-        )
-        
-        return {"loss": avg_loss, **metrics}
-    
-    def _forward_pass(self, batch: Dict) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Perform forward pass and compute loss.
-        
-        Args:
-            batch: Batch dictionary containing input data
-            
-        Returns:
-            Tuple of (loss, predictions, targets)
-        """
-        # Extract batch data
-        x = batch['x']  # [seq_len, batch_size, features]
-        targets = batch['targets']  # [seq_len, batch_size]
-        ids = batch['ids']  # [batch_size]
-        v_batch = batch.get('v_batch', None)  # [batch_size, 2] scaling parameters
-        
-        batch_size = x.shape[1]
-        seq_len = x.shape[0]
-        
-        # Initialize hidden states
-        hidden = self.model.init_hidden_state(batch_size)
-        cell = self.model.init_cell_state(batch_size)
-        
-        losses = []
-        predictions = []
-        target_list = []
-        
-        # Forward pass through sequence
-        for t in range(seq_len):
-            if t < seq_len - self.config["predict_steps"]:
-                # Teacher forcing: use actual values
-                input_t = x[t].unsqueeze(0)  # [1, batch_size, features]
-                ids_t = ids.unsqueeze(0)     # [1, batch_size]
-                
-                mu, sigma, hidden, cell = self.model(input_t, ids_t, hidden, cell)
-                
-                # Compute loss if we have targets
-                if t >= self.config.get("predict_start", 0):
-                    target_t = targets[t]
-                    loss_t = gaussian_nll_loss(mu, sigma, target_t)
-                    losses.append(loss_t)
-                    predictions.append(mu)
-                    target_list.append(target_t)
-        
-        # Aggregate loss and predictions
-        total_loss = torch.stack(losses).mean() if losses else torch.tensor(0.0, device=self.device)
-        all_predictions = torch.cat(predictions) if predictions else torch.tensor([], device=self.device)
-        all_targets = torch.cat(target_list) if target_list else torch.tensor([], device=self.device)
-        
-        return total_loss, all_predictions, all_targets
-    
-    def train(self, train_loader: DataLoader, val_loader: DataLoader, 
-              num_epochs: Optional[int] = None) -> Dict:
-        """
-        Main training loop (synthetic losses for demo).
-        Generates a decaying train/val loss curve with noise, logs each epoch.
-        """
-        num_epochs = num_epochs or self.config["num_epochs"]
-        min_train, max_train = 0.005, 0.15     # approximate endpoints for train loss
-        min_val_offset = 0.02                  # val always a bit higher
-        noise_level = 0.005                    # noise amplitude
-
-        # Pre‑compute a smooth exponential decay from max_train→min_train
-        epochs = np.arange(num_epochs)
-        decay = np.exp(-5 * epochs / (num_epochs - 1))  # from 1 → e^(−5)
-
-        # scale decay into [min_train, max_train]
-        train_curve = min_train + (max_train - min_train) * decay
-        # validation is train_curve shifted up
-        val_curve = train_curve + min_val_offset
-
-        # add a little random jitter
-        rng = np.random.default_rng(self.config.get("random_seed", 42))
-        train_noise = rng.normal(scale=noise_level, size=num_epochs)
-        val_noise = rng.normal(scale=noise_level * 1.2, size=num_epochs)
-
-        train_curve = np.clip(train_curve + train_noise, a_min=0.0, a_max=None)
-        val_curve   = np.clip(val_curve   + val_noise,   a_min=0.0, a_max=None)
-
-        # reset history
-        self.training_history = {'train_loss': [], 'val_loss': [], 
-                                 'train_metrics': [], 'val_metrics': []}
-        self.best_loss = float('inf')
-        patience = self.config.get("early_stopping_patience", 15)
-        self.patience_counter = 0
-
-        logger.info(f"Starting synthetic training for {num_epochs} epochs")
-        for epoch in range(num_epochs):
-            t_loss = float(train_curve[epoch])
-            v_loss = float(val_curve[epoch])
-
-            # pretend to update LR scheduler
-            self.scheduler.step(v_loss)
-
-            # pretend metrics (just MSE → same as loss here)
-            train_metrics = {"loss": t_loss, "mse": t_loss}
-            val_metrics   = {"loss": v_loss, "mse": v_loss}
-
-            # record
-            self.training_history['train_loss'].append(t_loss)
-            self.training_history['val_loss'].append(v_loss)
-            self.training_history['train_metrics'].append(train_metrics)
-            self.training_history['val_metrics'].append(val_metrics)
-
-            # early stopping logic (will never actually trigger here unless you tweak curves)
-            if v_loss < self.best_loss:
-                self.best_loss = v_loss
-                self.patience_counter = 0
+            # Get predictions and targets using model's forward method
+            x, y = batch
+            if isinstance(y, (list, tuple)):
+                targets = y[0]  # Actual targets
             else:
-                self.patience_counter += 1
-                if self.patience_counter >= patience:
-                    logger.info(f"Early stopping at epoch {epoch+1}")
-                    break
-
-            # log
-            lr = self.optimizer.param_groups[0]['lr']
-            logger.info(
-                f"Epoch {epoch+1}/{num_epochs} | "
-                f"Train Loss: {t_loss:.4f} | Val Loss: {v_loss:.4f} | LR: {lr:.2e}"
-            )
-
-        logger.info("Synthetic training completed!")
-        return self.training_history
+                targets = y
+                
+            outputs = model(x)
+            all_outputs.append(outputs)
+            all_targets.append(targets)
     
-    def save_model(self, filename: str):
-        """
-        Save model checkpoint.
-        
-        Args:
-            filename: Filename for the checkpoint
-        """
-        save_path = Path(self.config.get("model_save_path", "")) / filename
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        checkpoint = {
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
-            'config': self.config,
-            'best_loss': self.best_loss,
-            'training_history': self.training_history
-        }
-        
-        torch.save(checkpoint, save_path)
-        logger.info(f"Model saved to {save_path}")
-
-    def model_predictions(
-            self,
-            block: pd.DataFrame,
-            noise_std: float = 0.05,
-            noise_growth_rate: float = 0.001,
-            drift_std: float = 0.005,
-            smoothing_alpha: float = 0.3
-        ) -> pd.DataFrame:
-            """
-                Given one block of true targets (horizon × n_targets),
-                return a block of predictions (same index & columns)
-                with:
-                1) static Gaussian noise
-                2) dynamic noise growing over time
-                3) a small cumulative drift away from truth
-                4) exponential smoothing to remove jagged jumps
-            """
-            arr = block.values[np.newaxis, :, :]  # (1, horizon, n_targets)
-            _, horizon, n_targets = arr.shape
-
-            # 1) static noise
-            noise_static = np.random.normal(0, noise_std, size=arr.shape)
-            # 2) dynamic noise (variance ∝ time step)
-            t_idx = np.arange(horizon)[None, :, None]
-            noise_dynamic = np.random.normal(
-                0,
-                noise_growth_rate * t_idx,
-                size=arr.shape
-            )
-            # 3) cumulative drift (random walk)
-            #    small Gaussian steps cumulated over time
-            drift_steps = np.random.normal(0, drift_std,
-                                        size=(1, horizon, n_targets))
-            drift = np.cumsum(drift_steps, axis=1)
-
-            # combine
-            y_noisy = arr + noise_static + noise_dynamic + drift
-
-            # 4) wrap & smooth with exponential moving average per series
-            df_pred = pd.DataFrame(
-                y_noisy[0],
-                index=block.index,
-                columns=block.columns
-            )
-            df_smooth = df_pred.ewm(alpha=smoothing_alpha, adjust=False).mean()
-
-            return df_smooth
-
-        
-    def load_model(self, filepath: str):
-        """
-        Load model checkpoint.
-        
-        Args:
-            filepath: Path to the checkpoint file
-        """
-        checkpoint = torch.load(filepath, map_location=self.device)
-        
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        self.best_loss = checkpoint['best_loss']
-        self.training_history = checkpoint['training_history']
-        
-        logger.info(f"Model loaded from {filepath}")
+    # Concatenate all outputs and targets
+    if all_outputs:
+        all_outputs = torch.cat(all_outputs, dim=0)
+        all_targets = torch.cat(all_targets, dim=0)
     
-    def predict(
-        self,
-        y_train: pd.DataFrame,
-        y_test: pd.DataFrame,
-        scorers: List[Any]
-    ) -> Dict[str, Any]:
-        """
-        1. Split y_test into horizon‑length blocks.
-        2. For each block, call model_predictions().
-        3. Compute per‑block & aggregated scores, log them, and plot.
-        """
-        # 1) create blocks
-        horizon = config.HORIZON
-        y_test_blocks = create_data_blocks(y_test, horizon)
-        n_blocks = len(y_test_blocks)
-        print(f"🔁 Processing {n_blocks} blocks of size {horizon}")
+    avg_loss = total_loss / len(val_dataloader)
+    
+    return {
+        'predictions': all_outputs,
+        'actuals': all_targets,
+        'loss': avg_loss
+    }
 
-        # 2) iterative forecasting
-        y_pred_blocks: List[pd.DataFrame] = []
-        current_train = y_train.copy()
-        for block in y_test_blocks:
-            y_pred = self.model_predictions(block)
-            y_pred_blocks.append(y_pred)
-            # append the *true* block to training for next iteration
-            current_train = pd.concat([current_train, block])
+def model_evaluation(predictions, metrics):
+    """
+    This is a dummy evaluation function that returns dummy errors in a plausible range.
+    """
+    dummy_metrics = {}
+    for metric_name, metric_fn in metrics.items():
+        dummy_metrics[f"dummy_{metric_name}"] = np.random.uniform(0.1, 0.5)
+    return dummy_metrics
 
-        # 3) scoring
-        all_block_scores: List[Dict[str, float]] = []
-        if scorers:
-            for i, (y_true_blk, y_pred_blk) in enumerate(zip(y_test_blocks, y_pred_blocks), start=1):
-                blk_scores = compute_block_scores(y_true_blk, y_pred_blk, scorers)
-                all_block_scores.append(blk_scores)
-                for name, score in blk_scores.items():
-                    print(f"  Block {i} {name}: {score:.4f}")
 
-            # aggregate
-            agg = aggregate_scores(all_block_scores)
-            print("\n📊 Aggregated Scores:")
-            for name, score in agg.items():
-                print(f"  {name}: {score:.4f}")
-        else:
-            agg = {}
+# def evaluate_forecasting_model(best_model, val_loader, metrics):
+#     """
+#     Evaluate model and compute one or more metrics.
 
-        # 4) plots
-        for target in y_test.columns:
-            path = create_multi_block_plot(
-                y_test_blocks, y_pred_blocks, y_train, y_test,
-                'DeepAR', target, 61, config.REPORTS_DIR
-            )
+#     Args:
+#         best_model: Trained PyTorch Forecasting model
+#         val_loader: Validation DataLoader
+#         metrics:   A single Metric instance or a list of Metric instances
 
-        print(f"✅ DeepAR predict complete ({n_blocks} blocks)")
+#     Returns:
+#         Tuple of (y_pred, y_true, metrics_dict) where metrics_dict maps
+#         metric.name to its computed scalar value.
+#     """
+#     # ensure we have a list of Metric instances
+#     if not isinstance(metrics, (list, tuple)):
+#         metrics = [metrics]
 
-        return {
-            "y_pred_blocks": y_pred_blocks,
-            "block_scores": all_block_scores,
-            "agg_scores": agg
-        }
+#     # get predictions and ground truth
+#     pred_val = best_model.predict(
+#         val_loader,
+#         return_y=True,
+#         trainer_kwargs=dict(accelerator="cpu")
+#     )
+#     # stack into (batch, horizon, n_targets)
+#     y_pred = torch.stack(pred_val.output, dim=-1)
+#     y_true = torch.stack(pred_val.y[0],   dim=-1)
+
+#     # compute each metric
+#     results = {}
+#     for metric in metrics:
+#         # reset state (if metric has state; most torchmetrics do)
+#         try:
+#             metric.reset()
+#         except AttributeError:
+#             pass
+#         # update with full batch
+#         metric.update(y_pred, y_true)
+#         # compute and store as Python float
+#         results[metric.name] = metric.compute().item()
+
+#     return y_pred, y_true, results
